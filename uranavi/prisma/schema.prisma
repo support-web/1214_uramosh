@@ -1,0 +1,368 @@
+// Prisma schema for ウラナビ (UraNav) - 占い師特化型予約・決済プラットフォーム
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== 認証関連 ====================
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ==================== ユーザー関連 ====================
+
+enum UserRole {
+  CLIENT
+  DIVINER
+  ADMIN
+}
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  emailVerified   DateTime?
+  passwordHash    String?
+  name            String?
+  image           String?
+  role            UserRole  @default(CLIENT)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  deletedAt       DateTime?
+
+  accounts Account[]
+  sessions Session[]
+  diviner  Diviner?
+  client   Client?
+
+  @@map("users")
+}
+
+model Diviner {
+  id                String        @id @default(cuid())
+  userId            String        @unique
+  displayName       String
+  bio               String?       @db.Text
+  profileImageUrl   String?
+  coverImageUrl     String?
+  yearsOfExperience Int?
+  status            DivinerStatus @default(PENDING)
+  isOnline          Boolean       @default(false)
+  verifiedAt        DateTime?
+  ratingAvg         Decimal       @default(0) @db.Decimal(3, 2)
+  reviewCount       Int           @default(0)
+  bookingCount      Int           @default(0)
+  stripeAccountId   String?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  user              User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  divinationTypes   DivinerDivinationType[]
+  consultationGenres DivinerConsultationGenre[]
+  services          Service[]
+  reviews           Review[]
+  bookings          Booking[]               @relation("DivinerBookings")
+  availabilities    Availability[]
+  coupons           Coupon[]
+
+  @@map("diviners")
+}
+
+enum DivinerStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+}
+
+model Client {
+  id        String    @id @default(cuid())
+  userId    String    @unique
+  nickname  String?
+  birthDate DateTime?
+  birthTime String?
+  gender    Gender?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bookings  Booking[]
+  reviews   Review[]
+  favorites Favorite[]
+
+  @@map("clients")
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+  PREFER_NOT_TO_SAY
+}
+
+// ==================== 占術・ジャンルマスタ ====================
+
+model DivinationType {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  diviners DivinerDivinationType[]
+
+  @@map("divination_types")
+}
+
+model DivinerDivinationType {
+  id              String  @id @default(cuid())
+  divinerId       String
+  divinationTypeId String
+  isPrimary       Boolean @default(false)
+
+  diviner        Diviner        @relation(fields: [divinerId], references: [id], onDelete: Cascade)
+  divinationType DivinationType @relation(fields: [divinationTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([divinerId, divinationTypeId])
+  @@map("diviner_divination_types")
+}
+
+model ConsultationGenre {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  diviners DivinerConsultationGenre[]
+
+  @@map("consultation_genres")
+}
+
+model DivinerConsultationGenre {
+  id                  String @id @default(cuid())
+  divinerId           String
+  consultationGenreId String
+
+  diviner           Diviner           @relation(fields: [divinerId], references: [id], onDelete: Cascade)
+  consultationGenre ConsultationGenre @relation(fields: [consultationGenreId], references: [id], onDelete: Cascade)
+
+  @@unique([divinerId, consultationGenreId])
+  @@map("diviner_consultation_genres")
+}
+
+// ==================== サービス関連 ====================
+
+enum ConsultationType {
+  VIDEO_CALL
+  VOICE_CALL
+  CHAT
+  EMAIL
+  IN_PERSON
+}
+
+model Service {
+  id               String           @id @default(cuid())
+  divinerId        String
+  title            String
+  description      String?          @db.Text
+  thumbnailUrl     String?
+  consultationType ConsultationType
+  durationMinutes  Int
+  price            Int
+  firstTimePrice   Int?
+  isActive         Boolean          @default(true)
+  sortOrder        Int              @default(0)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  diviner  Diviner   @relation(fields: [divinerId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+
+  @@map("services")
+}
+
+// ==================== 予約可能枠 ====================
+
+model Availability {
+  id          String   @id @default(cuid())
+  divinerId   String
+  dayOfWeek   Int      // 0-6 (日-土)
+  startTime   String   // HH:mm format
+  endTime     String   // HH:mm format
+  isAvailable Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  diviner Diviner @relation(fields: [divinerId], references: [id], onDelete: Cascade)
+
+  @@map("availabilities")
+}
+
+// ==================== 予約関連 ====================
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model Booking {
+  id              String        @id @default(cuid())
+  clientId        String
+  serviceId       String
+  divinerId       String
+  scheduledAt     DateTime
+  durationMinutes Int
+  extendedMinutes Int           @default(0)
+  status          BookingStatus @default(PENDING)
+  totalAmount     Int
+  sessionUrl      String?
+  preQuestion     String?       @db.Text
+  divinerMemo     String?       @db.Text
+  cancelledAt     DateTime?
+  cancelReason    String?       @db.Text
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  client  Client   @relation(fields: [clientId], references: [id])
+  service Service  @relation(fields: [serviceId], references: [id])
+  diviner Diviner  @relation("DivinerBookings", fields: [divinerId], references: [id])
+  payment Payment?
+  review  Review?
+
+  @@map("bookings")
+}
+
+// ==================== 決済関連 ====================
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  bookingId         String        @unique
+  amount            Int
+  platformFee       Int
+  stripePaymentId   String?       @unique
+  stripeTransferId  String?
+  status            PaymentStatus @default(PENDING)
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+// ==================== レビュー関連 ====================
+
+model Review {
+  id        String   @id @default(cuid())
+  bookingId String   @unique
+  clientId  String
+  divinerId String
+  rating    Int      // 1-5
+  comment   String?  @db.Text
+  isVisible Boolean  @default(true)
+  replyText String?  @db.Text
+  repliedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  client  Client  @relation(fields: [clientId], references: [id])
+  diviner Diviner @relation(fields: [divinerId], references: [id])
+
+  @@map("reviews")
+}
+
+// ==================== お気に入り関連 ====================
+
+model Favorite {
+  id        String   @id @default(cuid())
+  clientId  String
+  divinerId String
+  createdAt DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, divinerId])
+  @@map("favorites")
+}
+
+// ==================== クーポン関連 ====================
+
+enum CouponType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+model Coupon {
+  id            String     @id @default(cuid())
+  divinerId     String
+  code          String     @unique
+  type          CouponType
+  value         Int        // パーセンテージまたは固定金額
+  minPurchase   Int?       // 最低購入金額
+  maxDiscount   Int?       // 最大割引額
+  usageLimit    Int?       // 使用回数制限
+  usedCount     Int        @default(0)
+  validFrom     DateTime
+  validUntil    DateTime
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  diviner Diviner @relation(fields: [divinerId], references: [id], onDelete: Cascade)
+
+  @@map("coupons")
+}
